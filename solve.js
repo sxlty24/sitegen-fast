@@ -122,18 +122,18 @@ function findSingleStar(s,from){ for(let j=from;j<s.length;j++){ const c=s[j]; i
 const INLINE_SPECIAL = /[\\`*[]/;
 function inline(s,env){
   if(!INLINE_SPECIAL.test(s)) return escapeHtml(s);
-  const parts=[]; let i=0,plainStart=0; const n=s.length;
+  let out=''; let i=0,plainStart=0; const n=s.length;
   while(i<n){ const c=s[i];
-    if(c==='\\'&&i+1<n&&ESCAPABLE.has(s[i+1])){ if(i>plainStart)parts.push(escapeHtml(s.slice(plainStart,i))); parts.push(escapeHtml(s[i+1])); i+=2; plainStart=i; continue; }
-    if(c==='`'){ const j=s.indexOf('`',i+1); if(j>i+1){ if(i>plainStart)parts.push(escapeHtml(s.slice(plainStart,i))); parts.push('<code>',escapeHtml(s.slice(i+1,j)),'</code>'); i=j+1; plainStart=i; continue; } i++; continue; }
+    if(c==='\\'&&i+1<n&&ESCAPABLE.has(s[i+1])){ if(i>plainStart)out+=escapeHtml(s.slice(plainStart,i)); out+=escapeHtml(s[i+1]); i+=2; plainStart=i; continue; }
+    if(c==='`'){ const j=s.indexOf('`',i+1); if(j>i+1){ if(i>plainStart)out+=escapeHtml(s.slice(plainStart,i)); out+='<code>'+escapeHtml(s.slice(i+1,j))+'</code>'; i=j+1; plainStart=i; continue; } i++; continue; }
     if(c==='*'){
-      if(s[i+1]==='*'){ const j=findUnescaped(s,'**',i+2); if(j>i+2){ if(i>plainStart)parts.push(escapeHtml(s.slice(plainStart,i))); parts.push('<strong>',inline(s.slice(i+2,j),env),'</strong>'); i=j+2; plainStart=i; continue; } i+=2; continue; }
-      const j=findSingleStar(s,i+1); if(j>i+1){ if(i>plainStart)parts.push(escapeHtml(s.slice(plainStart,i))); parts.push('<em>',inline(s.slice(i+1,j),env),'</em>'); i=j+1; plainStart=i; continue; } i++; continue; }
+      if(s[i+1]==='*'){ const j=findUnescaped(s,'**',i+2); if(j>i+2){ if(i>plainStart)out+=escapeHtml(s.slice(plainStart,i)); out+='<strong>'+inline(s.slice(i+2,j),env)+'</strong>'; i=j+2; plainStart=i; continue; } i+=2; continue; }
+      const j=findSingleStar(s,i+1); if(j>i+1){ if(i>plainStart)out+=escapeHtml(s.slice(plainStart,i)); out+='<em>'+inline(s.slice(i+1,j),env)+'</em>'; i=j+1; plainStart=i; continue; } i++; continue; }
     if(c==='['){ const k=findUnescaped(s,']',i+1); const m=k!==-1&&s[k+1]==='('?s.indexOf(')',k+2):-1; const target=m===-1?'':s.slice(k+2,m);
-      if(target!==''&&!/\s/.test(target)){ if(i>plainStart)parts.push(escapeHtml(s.slice(plainStart,i))); parts.push('<a href="',escapeHtml(env.link(target)),'">',inline(s.slice(i+1,k),env),'</a>'); i=m+1; plainStart=i; continue; } i++; continue; }
+      if(target!==''&&!/\s/.test(target)){ if(i>plainStart)out+=escapeHtml(s.slice(plainStart,i)); out+='<a href="'+escapeHtml(env.link(target))+'">'+inline(s.slice(i+1,k),env)+'</a>'; i=m+1; plainStart=i; continue; } i++; continue; }
     i++; }
-  if(n>plainStart)parts.push(escapeHtml(s.slice(plainStart,n)));
-  return parts.join('');
+  if(n>plainStart)out+=escapeHtml(s.slice(plainStart,n));
+  return out;
 }
 function renderMarkdown(src,env){
   const ids=new Set(); const blocks=[]; const toc=[]; let excerpt=null;
@@ -204,6 +204,38 @@ function renderInto(out,nodes,scope,ctx,depth){
     else if(k==='include'){ const t=ctx.templates.get(n.name); if(t!==undefined&&depth<INCLUDE_DEPTH) renderInto(out,t,scope,ctx,depth+1); } }
 }
 
+// ---- template compiler: nodes -> JS function (avoids per-node interpretation) ----
+function jsStr(s){ return JSON.stringify(s); }
+function L(scope,path){ let s=scope; const p0=path[0]; while(s!==null&&!Object.hasOwn(s.vars,p0)) s=s.parent; if(s===null) return undefined; let v=s.vars[p0]; for(let k=1;k<path.length;k++){ if(v===null||typeof v!=='object'||!Object.hasOwn(v,path[k])) return undefined; v=v[path[k]]; } return v; }
+function compileNodes(nodes, sv){
+  const lines=[];
+  const P=(path)=>'L('+sv+',['+path.map(jsStr).join(',')+'])';
+  for(const n of nodes){ const k=n.kind;
+    if(k==='text') lines.push('o.push('+jsStr(n.text)+');');
+    else if(k==='var') lines.push('o.push(E(T('+P(n.path)+')));');
+    else if(k==='raw') lines.push('o.push(T('+P(n.path)+'));');
+    else if(k==='if'){ const cond='TR('+P(n.path)+')'+(n.not?'===false':'===true');
+      lines.push('if('+cond+'){'+compileNodes(n.then,sv)+'}'+(n.else?'else{'+compileNodes(n.else,sv)+'}':'')); }
+    else if(k==='for'){ const nm=jsStr(n.name); const csv='s'+(++compileDepth);
+      lines.push('{const xs='+P(n.path)+';if(Array.isArray(xs)){const len=xs.length;for(let kk=0;kk<len;kk++){const '+csv+'={vars:{['+nm+']:xs[kk],loop:{index:kk+1,first:kk===0,last:kk===len-1,length:len}},parent:'+sv+'};'+compileNodes(n.body,csv)+'}}}'); compileDepth--; }
+    else if(k==='include'){ const nm=jsStr(n.name);
+      lines.push('{const t=C.get('+nm+');if(t!==undefined&&d<'+INCLUDE_DEPTH+')t(o,'+sv+',d+1);}'); }
+  }
+  return lines.join('');
+}
+let compileDepth=0;
+function makeCompiler(templatesMap){
+  const C=new Map();
+  const E=escapeHtml, T=textOf, TR=truthy;
+  for(const [name,nodes] of templatesMap){
+    compileDepth=0;
+    const body=compileNodes(nodes,'s');
+    const fn=new Function('o','s','d','L','E','T','TR','C', body);
+    C.set(name,(o,s,d)=>fn(o,s,d,L,E,T,TR,C));
+  }
+  return C;
+}
+
 const REPORT_FILE='build-report.txt';
 const RESERVED=['posts','tags','page'];
 function byCodeUnits(a,b){ return a<b?-1:a>b?1:0; }
@@ -265,8 +297,8 @@ export function run(input){
   const site={title:input.site.title,base_url:base};
   const allTags=tags.map(t=>({name:t.name,slug:t.slug,url:t.url,count:t.posts.length}));
   const recent=posts.slice(0,input.site.recent).map(p=>cards.get(p));
-  const ctx={templates,escape:escapeHtml};
-  const render=(name,vars)=>{ const nodes=templates.get(name); return nodes===undefined?null:renderNodes(nodes,{vars:{site,tags:allTags,recent,...vars},parent:null},ctx,0); };
+  const compiled=makeCompiler(templates);
+  const render=(name,vars)=>{ const fn=compiled.get(name); if(fn===undefined) return null; const o=[]; fn(o,{vars:{site,tags:allTags,recent,...vars},parent:null},0); return o.join(''); };
   const output={};
   for(const s of kept) output[`${s.outDir}/index.html`]=render(s.layout,{page:pageOf(s)});
   const per=input.site.per_page; const pages=Math.max(1,Math.ceil(posts.length/per));
