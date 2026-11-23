@@ -4,10 +4,15 @@
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 const ESC_RE = /[&<>"']/g;
 const ESC_TEST = /[&<>"']/;
+const escCache = new Map();
 function escapeHtml(text) {
   if (!ESC_TEST.test(text)) return text;
+  const hit = escCache.get(text);
+  if (hit !== undefined) return hit;
   ESC_RE.lastIndex = 0;
-  return text.replace(ESC_RE, (c) => ESC[c]);
+  const r = text.replace(ESC_RE, (c) => ESC[c]);
+  if (escCache.size < 4096) escCache.set(text, r);
+  return r;
 }
 const SLUG_MAX = 64;
 const slugCache = new Map();
@@ -207,20 +212,20 @@ function renderInto(out,nodes,scope,ctx,depth){
 
 // ---- template compiler: nodes -> JS function (avoids per-node interpretation) ----
 function jsStr(s){ return JSON.stringify(s); }
-function L(scope,path){ let s=scope; const p0=path[0]; while(s!==null&&!Object.hasOwn(s.vars,p0)) s=s.parent; if(s===null) return undefined; let v=s.vars[p0]; for(let k=1;k<path.length;k++){ if(v===null||typeof v!=='object'||!Object.hasOwn(v,path[k])) return undefined; v=v[path[k]]; } return v; }
+function L(scope,path){ let s=scope; const p0=path[0]; while(s!==null&&!Object.hasOwn(s.vars,p0)) s=s.parent; if(s===null) return undefined; let v=s.vars[p0]; const pl=path.length; if(pl===1) return v; for(let k=1;k<pl;k++){ if(v===null||typeof v!=='object'||!Object.hasOwn(v,path[k])) return undefined; v=v[path[k]]; } return v; }
 function compileNodes(nodes, sv){
   const lines=[];
   const P=(path)=>'L('+sv+',['+path.map(jsStr).join(',')+'])';
   for(const n of nodes){ const k=n.kind;
-    if(k==='text') lines.push('o.push('+jsStr(n.text)+');');
-    else if(k==='var') lines.push('o.push(E(T('+P(n.path)+')));');
-    else if(k==='raw') lines.push('o.push(T('+P(n.path)+'));');
+    if(k==='text') lines.push('o+='+jsStr(n.text)+';');
+    else if(k==='var') lines.push('o+=E(T('+P(n.path)+'));');
+    else if(k==='raw') lines.push('o+=T('+P(n.path)+');');
     else if(k==='if'){ const cond='TR('+P(n.path)+')'+(n.not?'===false':'===true');
       lines.push('if('+cond+'){'+compileNodes(n.then,sv)+'}'+(n.else?'else{'+compileNodes(n.else,sv)+'}':'')); }
     else if(k==='for'){ const nm=jsStr(n.name); const csv='s'+(++compileDepth);
       lines.push('{const xs='+P(n.path)+';if(Array.isArray(xs)){const len=xs.length;const lp={index:0,first:false,last:false,length:len};const '+csv+'={vars:{['+nm+']:undefined,loop:lp},parent:'+sv+'};for(let kk=0;kk<len;kk++){'+csv+'.vars['+nm+']=xs[kk];lp.index=kk+1;lp.first=kk===0;lp.last=kk===len-1;'+compileNodes(n.body,csv)+'}}}'); compileDepth--; }
     else if(k==='include'){ const nm=jsStr(n.name);
-      lines.push('{const t=C.get('+nm+');if(t!==undefined&&d<'+INCLUDE_DEPTH+')t(o,'+sv+',d+1);}'); }
+      lines.push('{const t=C.get('+nm+');if(t!==undefined&&d<'+INCLUDE_DEPTH+')o=t(o,'+sv+',d+1);}'); }
   }
   return lines.join('');
 }
@@ -231,7 +236,7 @@ function makeCompiler(templatesMap){
   for(const [name,nodes] of templatesMap){
     compileDepth=0;
     const body=compileNodes(nodes,'s');
-    const fn=new Function('o','s','d','L','E','T','TR','C', body);
+    const fn=new Function('o','s','d','L','E','T','TR','C', body+'return o;');
     C.set(name,(o,s,d)=>fn(o,s,d,L,E,T,TR,C));
   }
   return C;
@@ -292,14 +297,14 @@ export function run(input){
   for(const s of kept) if(!s.post) s.tagRefs=ownTags(s).map(name=>bySlug.get(slugify(name))??{name,slug:slugify(name),url:'',posts:[]});
   const tags=[...bySlug.values()].sort((x,y)=>y.posts.length-x.posts.length||byCodeUnits(x.slug,y.slug));
   const linkOf=(s)=>(s===null?null:{title:s.data.title,url:s.url,date:s.data.date??'',date_long:s.data.date===undefined?'':longDate(s.data.date)});
-  const cardOf=(s)=>({ title:s.data.title,url:s.url,date:s.data.date??'',date_long:s.data.date===undefined?'':longDate(s.data.date),summary:s.data.summary??'',excerpt:s.excerpt,reading_minutes:Math.max(1,Math.ceil(wordsOf(s.body)/200)),tags:s.tagRefs.map(t=>({name:t.name,slug:t.slug,url:t.url})) });
+  const cardOf=(s)=>{ if(s._card!==undefined) return s._card; const c={ title:s.data.title,url:s.url,date:s.data.date??'',date_long:s.data.date===undefined?'':longDate(s.data.date),summary:s.data.summary??'',excerpt:s.excerpt,reading_minutes:Math.max(1,Math.ceil(wordsOf(s.body)/200)),tags:s.tagRefs.map(t=>({name:t.name,slug:t.slug,url:t.url})) }; s._card=c; return c; };
   const cards=new Map(posts.map(p=>[p,cardOf(p)]));
-  const pageOf=(s)=>({ ...cardOf(s),slug:s.slug,content:s.html,toc:s.toc.map(h=>({level:h.level,id:h.id,html:h.html})),newer:linkOf(s.newer??null),older:linkOf(s.older??null),is_post:s.post });
+  const pageOf=(s)=>{ const c=cardOf(s); return { title:c.title,url:c.url,date:c.date,date_long:c.date_long,summary:c.summary,excerpt:c.excerpt,reading_minutes:c.reading_minutes,tags:c.tags,slug:s.slug,content:s.html,toc:s.toc.map(h=>({level:h.level,id:h.id,html:h.html})),newer:linkOf(s.newer??null),older:linkOf(s.older??null),is_post:s.post }; };
   const site={title:input.site.title,base_url:base};
   const allTags=tags.map(t=>({name:t.name,slug:t.slug,url:t.url,count:t.posts.length}));
   const recent=posts.slice(0,input.site.recent).map(p=>cards.get(p));
   const compiled=makeCompiler(templates);
-  const render=(name,vars)=>{ const fn=compiled.get(name); if(fn===undefined) return null; const o=[]; fn(o,{vars:{site,tags:allTags,recent,...vars},parent:null},0); return o.join(''); };
+  const render=(name,vars)=>{ const fn=compiled.get(name); if(fn===undefined) return null; return fn('',{vars:{site,tags:allTags,recent,...vars},parent:null},0); };
   const output={};
   for(const s of kept) output[`${s.outDir}/index.html`]=render(s.layout,{page:pageOf(s)});
   const per=input.site.per_page; const pages=Math.max(1,Math.ceil(posts.length/per));
