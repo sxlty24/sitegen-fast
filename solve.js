@@ -92,12 +92,13 @@ const BULLET=/^[-*] (.*)$/;
 const ORDERED=/^(\d{1,9})\. (.*)$/;
 const CONTINUED=/^ {2,}\S/;
 function headingOf(line){ const m=HEADING.exec(line); return m===null||m[2]===''?null:{depth:m[1].length,text:m[2]}; }
-function endsParagraph(line){ return BLANK.test(line)||FENCE_OPEN.test(line)||headingOf(line)!==null||HR.test(line); }
+function isBlank(line){ for(let i=0;i<line.length;i++){ const c=line[i]; if(c!==' '&&c!=='\t') return false; } return true; }
+function endsParagraph(line){ if(line.length===0) return true; const c0=line[0]; if(c0===' '||c0==='\t') return isBlank(line); if(c0==='`') return FENCE_OPEN.test(line); if(c0==='#') return headingOf(line)!==null; if(c0==='-'||c0==='*') return HR.test(line); return false; }
 function trimLine(line){ let a=0,b=line.length; while(a<b&&(line[a]===' '||line[a]==='\t'))a++; while(b>a&&(line[b-1]===' '||line[b-1]==='\t'))b--; return a===0&&b===line.length?line:line.slice(a,b); }
 function lex(src){
   const lines=src.split('\n'); const tokens=[]; let i=0; const n=lines.length;
   while(i<n){ const line=lines[i];
-    if(BLANK.test(line)){i++;continue;}
+    if(isBlank(line)){i++;continue;}
     const fence=FENCE_OPEN.exec(line);
     if(fence!==null){ const body=[]; i++; while(i<n&&!FENCE_CLOSE.test(lines[i])) body.push(lines[i++]); i++; tokens.push({type:'code',lang:fence[1],lines:body}); continue; }
     const heading=headingOf(line);
@@ -217,7 +218,7 @@ function compileNodes(nodes, sv){
     else if(k==='if'){ const cond='TR('+P(n.path)+')'+(n.not?'===false':'===true');
       lines.push('if('+cond+'){'+compileNodes(n.then,sv)+'}'+(n.else?'else{'+compileNodes(n.else,sv)+'}':'')); }
     else if(k==='for'){ const nm=jsStr(n.name); const csv='s'+(++compileDepth);
-      lines.push('{const xs='+P(n.path)+';if(Array.isArray(xs)){const len=xs.length;for(let kk=0;kk<len;kk++){const '+csv+'={vars:{['+nm+']:xs[kk],loop:{index:kk+1,first:kk===0,last:kk===len-1,length:len}},parent:'+sv+'};'+compileNodes(n.body,csv)+'}}}'); compileDepth--; }
+      lines.push('{const xs='+P(n.path)+';if(Array.isArray(xs)){const len=xs.length;const lp={index:0,first:false,last:false,length:len};const '+csv+'={vars:{['+nm+']:undefined,loop:lp},parent:'+sv+'};for(let kk=0;kk<len;kk++){'+csv+'.vars['+nm+']=xs[kk];lp.index=kk+1;lp.first=kk===0;lp.last=kk===len-1;'+compileNodes(n.body,csv)+'}}}'); compileDepth--; }
     else if(k==='include'){ const nm=jsStr(n.name);
       lines.push('{const t=C.get('+nm+');if(t!==undefined&&d<'+INCLUDE_DEPTH+')t(o,'+sv+',d+1);}'); }
   }
@@ -239,7 +240,7 @@ function makeCompiler(templatesMap){
 const REPORT_FILE='build-report.txt';
 const RESERVED=['posts','tags','page'];
 function byCodeUnits(a,b){ return a<b?-1:a>b?1:0; }
-function wordsOf(text){ const m=text.match(/\S+/g); return m===null?0:m.length; }
+function wordsOf(text){ let c=0,inW=false; const n=text.length; for(let i=0;i<n;i++){ const ch=text.charCodeAt(i); let ws; if(ch<=127){ ws=ch===32||ch===9||ch===10||ch===13||ch===12||ch===11; } else { ws=ch===160||ch===5760||(ch>=8192&&ch<=8202)||ch===8232||ch===8233||ch===8239||ch===8287||ch===12288||ch===65279; } if(ws){inW=false;} else if(!inW){inW=true;c++;} } return c; }
 function resolvePath(dir,rel){ const parts=dir===''?[]:dir.split('/'); for(const seg of rel.split('/')){ if(seg===''||seg==='.') continue; if(seg==='..'){ if(parts.length===0) return null; parts.pop(); } else parts.push(seg); } return parts.join('/'); }
 function dirOf(path){ const i=path.lastIndexOf('/'); return i<0?'':path.slice(0,i); }
 
